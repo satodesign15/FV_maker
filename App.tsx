@@ -1,8 +1,9 @@
+
 import React, { useState, useEffect } from 'react';
+import { GoogleGenAI } from "@google/genai";
 import { UploadedImage, AppStatus, SuccessStrategy, GenerationHistory } from './types';
 import { ImageUploader } from './components/ImageUploader';
 import { Button } from './components/Button';
-import { analyzeSuccessDNA, generateFinalFV } from './services/geminiService';
 import { 
   Sparkles, 
   RotateCcw, 
@@ -20,6 +21,92 @@ import {
   CheckCircle2,
   Zap
 } from 'lucide-react';
+
+// --- アシスタント関数 (旧 geminiService.ts) ---
+
+const getClosestAspectRatio = (width: number, height: number): "1:1" | "3:4" | "4:3" | "9:16" | "16:9" => {
+  const ratio = width / height;
+  const supported: { name: "1:1" | "3:4" | "4:3" | "9:16" | "16:9"; value: number }[] = [
+    { name: '1:1', value: 1.0 },
+    { name: '3:4', value: 0.75 },
+    { name: '4:3', value: 1.333 },
+    { name: '9:16', value: 0.5625 },
+    { name: '16:9', value: 1.777 },
+  ];
+  return supported.reduce((prev, curr) => 
+    Math.abs(curr.value - ratio) < Math.abs(prev.value - ratio) ? curr : prev
+  ).name;
+};
+
+async function analyzeSuccessDNA(referenceImages: UploadedImage[]): Promise<SuccessStrategy> {
+  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  const model = 'gemini-3-pro-preview';
+  const imageParts = referenceImages.map(img => ({
+    inlineData: { mimeType: img.mimeType, data: img.base64Data }
+  }));
+  const prompt = `あなたは伝説的なWEBマーケター兼クリエイティブディレクターです。
+添付された「売れているFV（参考画像）」を分析し、その成功の要因（DNA）を抽出してください。
+表面的なデザインだけでなく、裏側の「心理的フック」や「情報設計」を言語化してください。
+
+JSON形式で出力してください：
+{
+  "target": "このFVが狙っている具体的なターゲット層とその悩み",
+  "valueProp": "一瞬で心を掴むための『最大の売り』の伝え方",
+  "visualHierarchy": "視線誘導の設計意図（何から順に見せているか、配置の黄金律）",
+  "colorStrategy": "色の組み合わせがユーザーに与える心理的影響と信頼構築の狙い",
+  "copySuggestion": "この成功構造を維持しつつ、新しい商品に適用する場合の最強のキャッチコピー案"
+}`;
+  const response = await ai.models.generateContent({
+    model,
+    contents: { parts: [...imageParts, { text: prompt }] },
+    config: { responseMimeType: "application/json", thinkingConfig: { thinkingBudget: 16000 } }
+  });
+  try {
+    return JSON.parse(response.text || "{}") as SuccessStrategy;
+  } catch (e) {
+    throw new Error("成功DNAの分析に失敗しました。AIの回答を解析できません。");
+  }
+}
+
+async function generateFinalFV(
+  strategy: SuccessStrategy,
+  assetImages: UploadedImage[],
+  userRequest: string,
+  dimensions: { width: number; height: number },
+  previousImage?: string
+): Promise<string> {
+  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  const model = 'gemini-3-pro-image-preview';
+  const assetParts = assetImages.map(img => ({
+    inlineData: { mimeType: img.mimeType, data: img.base64Data }
+  }));
+  const mappedRatio = getClosestAspectRatio(dimensions.width, dimensions.height);
+  let basePrompt = "";
+  const contentParts: any[] = [...assetParts];
+  if (previousImage) {
+    contentParts.push({ inlineData: { mimeType: 'image/png', data: previousImage } });
+    basePrompt = `【画像改善指示】前回の生成結果を元に修正してください。指示: ${userRequest} 比率: ${mappedRatio}`;
+  } else {
+    basePrompt = `【新規生成指令】戦略に基づき、提供された素材を使用して画像を生成してください。
+再現性ターゲット: 参考画像の構図・雰囲気・フォント配置を95%以上維持。
+ターゲット: ${strategy.target}
+配置コピー: 「${strategy.copySuggestion}」
+追加要望: ${userRequest}
+アスペクト比: ${mappedRatio}`;
+  }
+  contentParts.push({ text: basePrompt });
+  const response = await ai.models.generateContent({
+    model,
+    contents: { parts: contentParts },
+    config: { imageConfig: { aspectRatio: mappedRatio } }
+  });
+  for (const part of response.candidates?.[0]?.content?.parts || []) {
+    if (part.inlineData) return part.inlineData.data;
+  }
+  throw new Error("画像の生成に失敗しました。");
+}
+
+// --- App コンポーネント ---
 
 const SIZES = [
   { id: 'std', label: '標準 (1200x900)', w: 1200, h: 900 },
@@ -40,20 +127,14 @@ const App: React.FC = () => {
   const [resultImage, setResultImage] = useState<string | null>(null);
   const [error, setError] = useState('');
   const [adjustment, setAdjustment] = useState('');
-  
   const [history, setHistory] = useState<GenerationHistory[]>([]);
   const [currentIndex, setCurrentIndex] = useState(-1);
   const [isMaximized, setIsMaximized] = useState(false);
 
-  const isAnalyzing = status === AppStatus.ANALYZING;
-  const isGenerating = status === AppStatus.GENERATING;
-  const isReviewing = status === AppStatus.REVIEWING_STRATEGY;
-
   useEffect(() => {
     const checkKey = async () => {
       if (window.aistudio?.hasSelectedApiKey) {
-        const selected = await window.aistudio.hasSelectedApiKey();
-        setHasSelectedKey(selected);
+        setHasSelectedKey(await window.aistudio.hasSelectedApiKey());
       } else {
         setHasSelectedKey(true);
       }
@@ -61,104 +142,37 @@ const App: React.FC = () => {
     checkKey();
   }, []);
 
-  const handleError = (e: any) => {
-    const message = e.message || "予期せぬエラーが発生しました。";
-    if (message.includes("Requested entity was not found.")) {
-      setHasSelectedKey(false);
-    }
-    setError(message);
-    setStatus(AppStatus.ERROR);
-  };
-
   const handleAnalyze = async () => {
-    if (refImages.length === 0) {
-      setError('参考画像をアップロードしてください。');
-      return;
-    }
-    setError('');
-    setStatus(AppStatus.ANALYZING);
+    if (refImages.length === 0) { setError('参考画像を添付してください。'); return; }
+    setError(''); setStatus(AppStatus.ANALYZING);
     try {
-      const analyzedStrategy = await analyzeSuccessDNA(refImages);
-      setStrategy(analyzedStrategy);
-      setStatus(AppStatus.REVIEWING_STRATEGY);
-    } catch (e: any) {
-      handleError(e);
-    }
+      const s = await analyzeSuccessDNA(refImages);
+      setStrategy(s); setStatus(AppStatus.REVIEWING_STRATEGY);
+    } catch (e: any) { setStatus(AppStatus.ERROR); setError(e.message); }
   };
 
   const handleGenerateInitial = async () => {
-    if (!strategy) return;
-    if (assetImages.length === 0) {
-      setError('商品素材をアップロードしてください。');
-      return;
-    }
+    if (!strategy || assetImages.length === 0) { setError('素材をアップロードしてください。'); return; }
     setStatus(AppStatus.GENERATING);
     try {
       const b64 = await generateFinalFV(strategy, assetImages, userRequest, dimensions);
-      const newEntry: GenerationHistory = { imageUrl: b64, dimensions: { ...dimensions }, strategy: { ...strategy } };
-      const newHistory = [...history.slice(0, currentIndex + 1), newEntry];
-      setHistory(newHistory);
-      setCurrentIndex(newHistory.length - 1);
-      setResultImage(b64);
-      setStatus(AppStatus.SUCCESS);
-    } catch (e: any) {
-      handleError(e);
-    }
+      const entry = { imageUrl: b64, dimensions: { ...dimensions }, strategy: { ...strategy } };
+      const newHistory = [...history.slice(0, currentIndex + 1), entry];
+      setHistory(newHistory); setCurrentIndex(newHistory.length - 1);
+      setResultImage(b64); setStatus(AppStatus.SUCCESS);
+    } catch (e: any) { setStatus(AppStatus.ERROR); setError(e.message); }
   };
 
-  const handleAdjust = async (customInstruction?: string) => {
+  const handleAdjust = async () => {
     if (!strategy || currentIndex === -1) return;
     setStatus(AppStatus.GENERATING);
     try {
-      const currentEntry = history[currentIndex];
-      const instruction = customInstruction || adjustment || "微調整";
-      const b64 = await generateFinalFV(strategy, assetImages, instruction, dimensions, currentEntry.imageUrl);
-      const newEntry: GenerationHistory = { imageUrl: b64, dimensions: { ...dimensions }, strategy: { ...strategy } };
-      const newHistory = [...history.slice(0, currentIndex + 1), newEntry];
-      setHistory(newHistory);
-      setCurrentIndex(newHistory.length - 1);
-      setResultImage(b64);
-      setStatus(AppStatus.SUCCESS);
-      setAdjustment('');
-    } catch (e: any) {
-      handleError(e);
-    }
-  };
-
-  const navigateHistory = (index: number) => {
-    if (index >= 0 && index < history.length) {
-      setCurrentIndex(index);
-      const entry = history[index];
-      setResultImage(entry.imageUrl);
-      setDimensions(entry.dimensions);
-      setStrategy(entry.strategy);
-      const foundSize = SIZES.find(s => s.w === entry.dimensions.width && s.h === entry.dimensions.height);
-      setSelectedSizeId(foundSize ? foundSize.id : '');
-      setStatus(AppStatus.SUCCESS);
-    }
-  };
-
-  const downloadImage = () => {
-    if (!resultImage) return;
-    const link = document.createElement('a');
-    link.href = `data:image/png;base64,${resultImage}`;
-    link.download = `pixelperfect-fv-${Date.now()}.png`;
-    link.click();
-  };
-
-  const restart = () => {
-    setStatus(AppStatus.IDLE);
-    setResultImage(null);
-    setStrategy(null);
-    setHistory([]);
-    setCurrentIndex(-1);
-    setError('');
-    setUserRequest('');
-    setAdjustment('');
-  };
-
-  const updateStrategyField = (field: keyof SuccessStrategy, value: string) => {
-    if (strategy) setStrategy({ ...strategy, [field]: value });
+      const b64 = await generateFinalFV(strategy, assetImages, adjustment || "微調整", dimensions, history[currentIndex].imageUrl);
+      const entry = { imageUrl: b64, dimensions: { ...dimensions }, strategy: { ...strategy } };
+      const newHistory = [...history.slice(0, currentIndex + 1), entry];
+      setHistory(newHistory); setCurrentIndex(newHistory.length - 1);
+      setResultImage(b64); setStatus(AppStatus.SUCCESS); setAdjustment('');
+    } catch (e: any) { setStatus(AppStatus.ERROR); setError(e.message); }
   };
 
   if (!hasSelectedKey) {
@@ -166,15 +180,8 @@ const App: React.FC = () => {
       <div className="min-h-screen bg-slate-950 flex items-center justify-center p-6 text-center">
         <div className="max-w-md w-full bg-slate-900 rounded-[2.5rem] shadow-2xl p-10 space-y-8 border border-white/10">
           <div className="w-20 h-20 bg-brand-600 rounded-3xl mx-auto flex items-center justify-center"><Zap className="text-white" size={40} /></div>
-          <div className="space-y-4">
-            <h2 className="text-2xl font-black text-white uppercase italic tracking-tighter">Strategic Analysis Locked</h2>
-            <p className="text-slate-400 text-xs font-medium px-4">
-              分析の実行には有料プランのAPIキーが必要です。
-              <a href="https://ai.google.dev/gemini-api/docs/billing" target="_blank" rel="noopener noreferrer" className="text-brand-500 hover:underline block mt-1">
-                支払いの設定と詳細についてはこちら
-              </a>
-            </p>
-          </div>
+          <h2 className="text-2xl font-black text-white uppercase italic tracking-tighter">Strategic Analysis Locked</h2>
+          <p className="text-slate-400 text-xs px-4">分析の実行には有料プランのAPIキーが必要です。</p>
           <Button onClick={async () => { await window.aistudio?.openSelectKey(); setHasSelectedKey(true); }} className="w-full py-5 rounded-2xl text-lg">認証を開始</Button>
         </div>
       </div>
@@ -182,34 +189,32 @@ const App: React.FC = () => {
   }
 
   return (
-    <div className="h-screen bg-[#020617] text-slate-200 font-sans flex flex-col overflow-hidden selection:bg-brand-500/30">
-      <header className="bg-slate-900/80 backdrop-blur-md border-b border-slate-800 z-50 h-16 px-8 flex items-center justify-between shrink-0">
+    <div className="h-screen bg-[#020617] text-slate-200 font-sans flex flex-col overflow-hidden">
+      <header className="bg-slate-900/80 backdrop-blur-md border-b border-slate-800 h-16 px-8 flex items-center justify-between shrink-0 z-50">
         <div className="flex items-center space-x-3">
           <div className="bg-brand-600 p-2 rounded-xl text-white"><TrendingUp size={20} /></div>
-          <h1 className="text-xl font-black italic tracking-tighter leading-none text-white">PixelPerfect <span className="text-brand-500">FV</span></h1>
+          <h1 className="text-xl font-black italic tracking-tighter text-white">PixelPerfect <span className="text-brand-500">FV</span></h1>
         </div>
-        <div className="flex items-center space-x-4">
-          <button onClick={restart} className="p-2 hover:bg-slate-800 rounded-xl transition-colors text-slate-400 hover:text-white"><RotateCcw size={18} /></button>
-        </div>
+        <button onClick={() => { setStatus(AppStatus.IDLE); setResultImage(null); setHistory([]); }} className="p-2 hover:bg-slate-800 rounded-xl transition-colors text-slate-400 hover:text-white"><RotateCcw size={18} /></button>
       </header>
 
       <div className="flex-1 flex overflow-hidden">
-        <aside className="w-[400px] bg-slate-900 border-r border-slate-800 flex flex-col h-full shadow-2xl z-40 shrink-0">
+        <aside className="w-[400px] bg-slate-900 border-r border-slate-800 flex flex-col shadow-2xl z-40 shrink-0">
           <div className="flex-1 overflow-y-auto p-6 space-y-8 custom-scrollbar">
             <section className="space-y-4">
               <h3 className="text-sm font-black italic uppercase tracking-wider text-slate-300 flex items-center"><Layout className="mr-2" size={16} /> 1. お手本の分析</h3>
               <div className="bg-slate-800/50 p-4 rounded-2xl border border-slate-700/50 space-y-4">
                 <ImageUploader label="参考画像の添付" images={refImages} onImagesChange={setRefImages} />
-                {(status === AppStatus.IDLE || isAnalyzing) && (
-                  <Button onClick={handleAnalyze} isLoading={isAnalyzing} className="w-full h-12">分析を開始する <ChevronRight className="ml-2" size={16} /></Button>
+                {(status === AppStatus.IDLE || status === AppStatus.ANALYZING) && (
+                  <Button onClick={handleAnalyze} isLoading={status === AppStatus.ANALYZING} className="w-full h-12">分析を開始する <ChevronRight className="ml-2" size={16} /></Button>
                 )}
               </div>
             </section>
             <section className="space-y-4">
-              <h3 className="text-sm font-black italic uppercase tracking-wider text-slate-300 flex items-center"><CheckCircle2 className={`mr-2 ${strategy ? 'text-brand-500' : 'text-slate-500'}`} size={16} /> 2. 素材提供</h3>
+              <h3 className="text-sm font-black italic uppercase tracking-wider text-slate-300 flex items-center"><CheckCircle2 className="mr-2" size={16} /> 2. 素材提供</h3>
               <div className="bg-slate-800/50 p-4 rounded-2xl border border-slate-700/50 space-y-6">
                 <ImageUploader label="商品素材" images={assetImages} onImagesChange={setAssetImages} />
-                <textarea className="w-full bg-slate-950/50 border border-slate-700 rounded-xl p-4 text-xs font-medium focus:ring-1 ring-brand-500/50 outline-none h-24 resize-none text-slate-300" placeholder="追加のこだわりや要望..." value={userRequest} onChange={(e) => setUserRequest(e.target.value)} />
+                <textarea className="w-full bg-slate-950/50 border border-slate-700 rounded-xl p-4 text-xs font-medium focus:ring-1 ring-brand-500/50 outline-none h-24 resize-none text-slate-300" placeholder="追加のこだわり..." value={userRequest} onChange={(e) => setUserRequest(e.target.value)} />
               </div>
             </section>
             <section className="space-y-4">
@@ -217,103 +222,79 @@ const App: React.FC = () => {
               <div className="bg-slate-800/50 p-4 rounded-2xl border border-slate-700/50 space-y-4">
                 <div className="grid grid-cols-2 gap-2">
                   {SIZES.map(s => (
-                    <button key={s.id} onClick={() => { setSelectedSizeId(s.id); setDimensions({ width: s.w, height: s.h }); }} className={`py-3 px-1 rounded-lg text-[9px] font-black text-center transition-all border ${selectedSizeId === s.id ? 'bg-brand-600 text-white border-brand-600' : 'bg-slate-950 text-slate-500 border-slate-800 hover:border-slate-600'}`}>{s.label}</button>
+                    <button key={s.id} onClick={() => { setSelectedSizeId(s.id); setDimensions({ width: s.w, height: s.h }); }} className={`py-3 px-1 rounded-lg text-[9px] font-black border transition-all ${selectedSizeId === s.id ? 'bg-brand-600 text-white border-brand-600' : 'bg-slate-950 text-slate-500 border-slate-800 hover:border-slate-600'}`}>{s.label}</button>
                   ))}
                 </div>
               </div>
             </section>
             <div className="pt-6 border-t border-slate-800">
-              <Button onClick={strategy ? handleGenerateInitial : handleAnalyze} isLoading={isAnalyzing || isGenerating} className="w-full h-14 text-lg">{strategy ? '画像を新規生成' : '分析を開始'} <Sparkles className="ml-2" /></Button>
+              <Button onClick={strategy ? handleGenerateInitial : handleAnalyze} isLoading={status === AppStatus.ANALYZING || status === AppStatus.GENERATING} className="w-full h-14 text-lg">{strategy ? '画像を新規生成' : '分析を開始'} <Sparkles className="ml-2" /></Button>
             </div>
           </div>
         </aside>
 
-        <main className="flex-1 flex flex-col overflow-hidden bg-slate-950 relative">
+        <main className="flex-1 flex flex-col bg-slate-950 relative overflow-hidden">
           {history.length > 0 && (
-            <div className="h-20 bg-slate-900/50 border-b border-slate-800 flex items-center px-8 space-x-4 shrink-0 overflow-hidden">
-              <div className="flex items-center space-x-2 text-[10px] font-black text-slate-500 mr-4 uppercase tracking-widest shrink-0"><History size={14} /> <span>HISTORY</span></div>
-              <div className="flex-1 flex items-center space-x-4 overflow-x-auto custom-scrollbar h-full py-2">
-                <button disabled={currentIndex <= 0} onClick={() => navigateHistory(currentIndex - 1)} className="p-2 bg-brand-900/50 hover:bg-brand-600 disabled:opacity-10 rounded-lg text-white transition-colors shrink-0 border border-brand-500/30"><ChevronLeft size={16} /></button>
-                <div className="flex items-center space-x-3">
-                  {history.map((h, i) => (
-                    <button key={i} onClick={() => navigateHistory(i)} className={`w-12 h-12 rounded-lg overflow-hidden border-2 transition-all shrink-0 ${currentIndex === i ? 'border-brand-500 scale-110 shadow-lg' : 'border-slate-800 opacity-40 hover:opacity-100'}`}><img src={`data:image/png;base64,${h.imageUrl}`} className="w-full h-full object-cover" /></button>
-                  ))}
-                </div>
-                <button disabled={currentIndex >= history.length - 1} onClick={() => navigateHistory(currentIndex + 1)} className="p-2 bg-brand-900/50 hover:bg-brand-600 disabled:opacity-10 rounded-lg text-white transition-colors shrink-0 border border-brand-500/30"><ChevronRight size={16} /></button>
-              </div>
+            <div className="h-20 bg-slate-900/50 border-b border-slate-800 flex items-center px-8 space-x-4 shrink-0 overflow-x-auto">
+              {history.map((h, i) => (
+                <button key={i} onClick={() => { setCurrentIndex(i); setResultImage(h.imageUrl); }} className={`w-12 h-12 rounded-lg border-2 shrink-0 overflow-hidden ${currentIndex === i ? 'border-brand-500 scale-110' : 'border-slate-800 opacity-40'}`}><img src={`data:image/png;base64,${h.imageUrl}`} className="w-full h-full object-cover" /></button>
+              ))}
             </div>
           )}
 
           <div className="flex-1 flex flex-col p-6 overflow-hidden">
-            <div className="flex-1 bg-slate-900/30 rounded-[2.5rem] border border-slate-800/50 flex flex-col min-h-0 relative shadow-inner overflow-y-auto custom-scrollbar">
-              <div className="flex-1 flex items-center justify-center p-4 min-h-0">
-                {isReviewing && strategy && (
-                  <div className="w-full max-w-6xl mx-auto p-12 flex flex-col space-y-10 animate-in fade-in slide-in-from-bottom-6">
-                    <div className="text-center space-y-4">
-                      <div className="inline-flex items-center space-x-3 bg-brand-600/10 text-brand-400 px-6 py-2 rounded-full text-xs font-black border border-brand-600/20 tracking-widest"><Zap size={16} className="text-brand-500" /><span>INTELLIGENCE REPORT</span></div>
-                      <h2 className="text-6xl font-black italic tracking-tighter text-white uppercase leading-none">SUCCESS <span className="text-brand-500">DNA</span> REPORT</h2>
-                      <p className="text-slate-400 font-bold max-w-2xl mx-auto text-lg leading-relaxed">参考画像から「売れる理由」を完全に抽出しました。</p>
-                    </div>
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                      <div className="bg-slate-900/80 border border-slate-800 p-8 rounded-[2.5rem] space-y-4 group hover:border-brand-500/50 transition-colors">
-                        <div className="flex items-center text-brand-500 font-black text-sm uppercase tracking-widest"><Target size={20} className="mr-3"/> Target</div>
-                        <textarea value={strategy.target} onChange={e => updateStrategyField('target', e.target.value)} className="w-full bg-slate-950 border border-slate-800 rounded-2xl p-4 text-sm font-medium focus:ring-1 ring-brand-500 outline-none h-48 resize-none text-slate-200" />
-                      </div>
-                      <div className="bg-slate-900/80 border border-slate-800 p-8 rounded-[2.5rem] space-y-4 group hover:border-brand-500/50 transition-colors">
-                        <div className="flex items-center text-brand-500 font-black text-sm uppercase tracking-widest"><Sparkles size={20} className="mr-3"/> DNA</div>
-                        <textarea value={strategy.valueProp} onChange={e => updateStrategyField('valueProp', e.target.value)} className="w-full bg-slate-950 border border-slate-800 rounded-2xl p-4 text-sm font-medium focus:ring-1 ring-brand-500 outline-none h-48 resize-none text-slate-200" />
-                      </div>
-                      <div className="bg-brand-600 p-8 rounded-[2.5rem] flex flex-col justify-center text-white">
-                         <p className="text-[10px] font-black uppercase tracking-widest mb-4 opacity-70">Suggested Copy</p>
-                         <textarea value={strategy.copySuggestion} onChange={e => updateStrategyField('copySuggestion', e.target.value)} className="w-full bg-brand-700/50 border border-white/20 rounded-xl p-4 text-lg font-black italic text-white outline-none focus:ring-2 ring-white/50 mb-6 h-32 resize-none" />
-                         <Button onClick={handleGenerateInitial} isLoading={isGenerating} className="w-full h-14 bg-white text-brand-600 hover:bg-slate-100 text-lg">画像を生成する <ChevronRight className="ml-2" /></Button>
-                      </div>
+            <div className="flex-1 bg-slate-900/30 rounded-[2.5rem] border border-slate-800/50 flex flex-col items-center justify-center relative overflow-y-auto">
+              {status === AppStatus.REVIEWING_STRATEGY && strategy && (
+                <div className="w-full max-w-4xl p-12 space-y-10 text-center animate-in fade-in slide-in-from-bottom-4">
+                  <div className="space-y-2">
+                    <h2 className="text-5xl font-black italic tracking-tighter text-white">SUCCESS DNA</h2>
+                    <p className="text-slate-400 font-bold">参考画像から「売れる理由」を抽出しました。</p>
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-left">
+                    <div className="bg-slate-900 p-6 rounded-3xl border border-slate-800"><p className="text-brand-500 font-black text-[10px] uppercase mb-2 tracking-widest">Target</p><p className="text-sm font-medium">{strategy.target}</p></div>
+                    <div className="bg-slate-900 p-6 rounded-3xl border border-slate-800"><p className="text-brand-500 font-black text-[10px] uppercase mb-2 tracking-widest">DNA</p><p className="text-sm font-medium">{strategy.valueProp}</p></div>
+                    <div className="bg-brand-600 p-6 rounded-3xl md:col-span-2 text-white"><p className="text-white/70 font-black text-[10px] uppercase mb-2 tracking-widest">Copy Suggestion</p><p className="text-xl font-black italic">{strategy.copySuggestion}</p></div>
+                  </div>
+                  <Button onClick={handleGenerateInitial} className="px-12 h-16 text-xl">この戦略で生成を開始 <ChevronRight className="ml-2" /></Button>
+                </div>
+              )}
+              {(status === AppStatus.ANALYZING || status === AppStatus.GENERATING) && (
+                <div className="text-center space-y-6">
+                  <div className="w-16 h-16 border-4 border-brand-500 border-t-transparent rounded-full animate-spin mx-auto"></div>
+                  <p className="text-brand-500 font-black italic animate-pulse">{status === AppStatus.ANALYZING ? "DECODING DNA..." : "RENDERING..."}</p>
+                </div>
+              )}
+              {resultImage && status !== AppStatus.REVIEWING_STRATEGY && (
+                <div className="w-full h-full p-8 flex items-center justify-center relative group">
+                  <div className="relative shadow-2xl rounded-2xl overflow-hidden border border-white/5 max-h-full" style={{ aspectRatio: `${dimensions.width}/${dimensions.height}` }}>
+                    <img src={`data:image/png;base64,${resultImage}`} className="w-full h-full object-contain bg-slate-950" alt="Generated" />
+                    <div className="absolute inset-0 bg-slate-950/60 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center space-x-6">
+                      <button onClick={() => { const l = document.createElement('a'); l.href = `data:image/png;base64,${resultImage}`; l.download = 'fv.png'; l.click(); }} className="bg-brand-600 p-5 rounded-full hover:scale-110 transition-transform"><Download size={32} /></button>
+                      <button onClick={() => setIsMaximized(true)} className="bg-slate-800 p-5 rounded-full hover:scale-110 transition-transform"><Maximize2 size={32} /></button>
                     </div>
                   </div>
-                )}
-                {(isAnalyzing || isGenerating) && (
-                  <div className="text-center space-y-8 animate-in fade-in zoom-in">
-                    <div className="relative w-24 h-24 mx-auto">
-                      <div className="absolute inset-0 border-[6px] border-slate-800 rounded-full"></div>
-                      <div className="absolute inset-0 border-[6px] border-brand-500 rounded-full border-t-transparent animate-spin"></div>
-                      <Sparkles className="absolute inset-0 m-auto text-brand-500 animate-pulse" size={32} />
-                    </div>
-                    <h2 className="text-xl font-black italic text-white uppercase tracking-tighter">{isAnalyzing ? "Decoding Intent..." : "Rendering..."}</h2>
-                  </div>
-                )}
-                {resultImage && !isReviewing && (
-                  <div className="w-full h-full flex items-center justify-center p-2 group relative">
-                    <div className="max-w-full max-h-full shadow-2xl rounded-2xl overflow-hidden border-2 border-slate-800 relative" style={{ aspectRatio: `${dimensions.width}/${dimensions.height}`, width: dimensions.width >= dimensions.height ? '100%' : 'auto', height: dimensions.height > dimensions.width ? '100%' : 'auto' }}>
-                      <img src={`data:image/png;base64,${resultImage}`} className="w-full h-full object-contain bg-slate-950" alt="Design Output" />
-                      <div className="absolute inset-0 bg-slate-950/60 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center space-x-4">
-                         <button onClick={downloadImage} className="bg-brand-600 text-white p-4 rounded-full hover:scale-105 transition-all"><Download size={24} /></button>
-                         <button onClick={() => setIsMaximized(true)} className="bg-brand-600 text-white p-4 rounded-full hover:scale-105 transition-all"><Maximize2 size={24} /></button>
-                      </div>
-                    </div>
-                  </div>
-                )}
-              </div>
-              {resultImage && !isReviewing && (
-                <div className="p-6 border-t border-slate-800 bg-slate-900/50 mt-auto">
+                </div>
+              )}
+              {resultImage && (
+                <div className="w-full p-6 border-t border-slate-800 bg-slate-900/50 shrink-0">
                   <div className="max-w-4xl mx-auto flex space-x-2">
-                    <input type="text" className="flex-1 bg-slate-950 border border-slate-800 rounded-2xl px-4 py-3 text-sm font-bold outline-none text-white ring-1 ring-white/5" placeholder="日本語で修正指示を入力..." value={adjustment} onChange={(e) => setAdjustment(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && handleAdjust()} />
-                    <Button onClick={() => handleAdjust()} isLoading={isGenerating} className="rounded-xl px-6 h-12">修正</Button>
+                    <input type="text" className="flex-1 bg-slate-950 border border-slate-800 rounded-2xl px-6 py-4 text-sm font-bold outline-none text-white focus:ring-1 ring-brand-500" placeholder="修正指示をどうぞ..." value={adjustment} onChange={e => setAdjustment(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleAdjust()} />
+                    <Button onClick={handleAdjust} className="rounded-2xl px-8 h-14">修正実行</Button>
                   </div>
                 </div>
               )}
             </div>
           </div>
-          {error && <div className="absolute bottom-6 right-6 bg-red-500/10 border border-red-500/20 text-red-400 p-3 rounded-xl text-[10px] font-bold flex items-center space-x-2 animate-in slide-in-from-right"><AlertCircle size={14} /><span>{error}</span></div>}
         </main>
       </div>
 
       {isMaximized && resultImage && (
-        <div className="fixed inset-0 z-[100] bg-slate-950/98 backdrop-blur-xl flex flex-col items-center justify-center p-10 animate-in fade-in">
-          <button onClick={() => setIsMaximized(false)} className="absolute top-8 right-8 text-white/50 hover:text-white"><X size={48} /></button>
-          <img src={`data:image/png;base64,${resultImage}`} className="max-w-full max-h-full object-contain rounded-xl shadow-2xl border border-white/5" alt="Maximized" />
-          <div className="mt-10"><Button onClick={downloadImage} className="px-12 py-5 rounded-2xl text-xl"><Download size={24} className="mr-3" /> 画像を保存する</Button></div>
+        <div className="fixed inset-0 z-[100] bg-slate-950 flex flex-col items-center justify-center p-10 animate-in fade-in">
+          <button onClick={() => setIsMaximized(false)} className="absolute top-10 right-10 text-white/50 hover:text-white"><X size={48} /></button>
+          <img src={`data:image/png;base64,${resultImage}`} className="max-w-full max-h-full object-contain rounded-xl" />
         </div>
       )}
+      {error && <div className="absolute bottom-10 right-10 bg-red-500/10 border border-red-500 text-red-400 p-4 rounded-2xl font-black text-xs flex items-center"><AlertCircle size={16} className="mr-2" />{error}</div>}
     </div>
   );
 };
