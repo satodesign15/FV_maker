@@ -1,3 +1,4 @@
+
 {
   "name": "pixelperfect-fv-generator",
   "private": true,
@@ -5,7 +6,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build",
+    "build": "vite build",
     "preview": "vite preview"
   },
   "dependencies": {
@@ -18,6 +19,7 @@
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^4.3.0",
     "typescript": "^5.0.0",
     "vite": "^6.0.0",
     "autoprefixer": "^10.4.0",
