@@ -3,7 +3,7 @@ import React, { useState, useEffect } from 'react';
 import { UploadedImage, AppStatus, SuccessStrategy, GenerationHistory } from './types';
 import { ImageUploader } from './components/ImageUploader';
 import { Button } from './components/Button';
-import { analyzeSuccessDNA, generateFinalFV } from './services/geminiService';
+import * as GeminiService from './services/geminiService';
 import { 
   Sparkles, 
   RotateCcw, 
@@ -11,7 +11,6 @@ import {
   AlertCircle,
   TrendingUp,
   Target,
-  Palette,
   ChevronRight,
   ChevronLeft,
   History,
@@ -19,7 +18,6 @@ import {
   Settings2,
   Maximize2,
   X,
-  Edit3,
   CheckCircle2,
   Zap
 } from 'lucide-react';
@@ -48,7 +46,6 @@ const App: React.FC = () => {
   const [currentIndex, setCurrentIndex] = useState(-1);
   const [isMaximized, setIsMaximized] = useState(false);
 
-  // Fix: Use derived boolean variables to prevent TypeScript narrowing conflicts in JSX
   const isAnalyzing = status === AppStatus.ANALYZING;
   const isGenerating = status === AppStatus.GENERATING;
   const isReviewing = status === AppStatus.REVIEWING_STRATEGY;
@@ -65,7 +62,6 @@ const App: React.FC = () => {
     checkKey();
   }, []);
 
-  // Fix: Implementation of graceful key reset on specific API error
   const handleError = (e: any) => {
     const message = e.message || "予期せぬエラーが発生しました。";
     if (message.includes("Requested entity was not found.")) {
@@ -83,7 +79,7 @@ const App: React.FC = () => {
     setError('');
     setStatus(AppStatus.ANALYZING);
     try {
-      const analyzedStrategy = await analyzeSuccessDNA(refImages);
+      const analyzedStrategy = await GeminiService.analyzeSuccessDNA(refImages);
       setStrategy(analyzedStrategy);
       setStatus(AppStatus.REVIEWING_STRATEGY);
     } catch (e: any) {
@@ -99,7 +95,7 @@ const App: React.FC = () => {
     }
     setStatus(AppStatus.GENERATING);
     try {
-      const b64 = await generateFinalFV(strategy, assetImages, userRequest, dimensions);
+      const b64 = await GeminiService.generateFinalFV(strategy, assetImages, userRequest, dimensions);
       const newEntry: GenerationHistory = { imageUrl: b64, dimensions: { ...dimensions }, strategy: { ...strategy } };
       const newHistory = [...history.slice(0, currentIndex + 1), newEntry];
       setHistory(newHistory);
@@ -117,7 +113,7 @@ const App: React.FC = () => {
     try {
       const currentEntry = history[currentIndex];
       const instruction = customInstruction || adjustment || "微調整";
-      const b64 = await generateFinalFV(strategy, assetImages, instruction, dimensions, currentEntry.imageUrl);
+      const b64 = await GeminiService.generateFinalFV(strategy, assetImages, instruction, dimensions, currentEntry.imageUrl);
       const newEntry: GenerationHistory = { imageUrl: b64, dimensions: { ...dimensions }, strategy: { ...strategy } };
       const newHistory = [...history.slice(0, currentIndex + 1), newEntry];
       setHistory(newHistory);
@@ -173,7 +169,6 @@ const App: React.FC = () => {
           <div className="w-20 h-20 bg-brand-600 rounded-3xl mx-auto flex items-center justify-center"><Zap className="text-white" size={40} /></div>
           <div className="space-y-4">
             <h2 className="text-2xl font-black text-white uppercase italic tracking-tighter">Strategic Analysis Locked</h2>
-            {/* Fix: Added required billing documentation link */}
             <p className="text-slate-400 text-xs font-medium px-4">
               分析の実行には有料プランのAPIキーが必要です。
               <a href="https://ai.google.dev/gemini-api/docs/billing" target="_blank" rel="noopener noreferrer" className="text-brand-500 hover:underline block mt-1">
@@ -253,7 +248,6 @@ const App: React.FC = () => {
           <div className="flex-1 flex flex-col p-6 overflow-hidden">
             <div className="flex-1 bg-slate-900/30 rounded-[2.5rem] border border-slate-800/50 flex flex-col min-h-0 relative shadow-inner overflow-y-auto custom-scrollbar">
               <div className="flex-1 flex items-center justify-center p-4 min-h-0">
-                {/* Fix: Use isReviewing instead of status === AppStatus.REVIEWING_STRATEGY to avoid TS narrowing error */}
                 {isReviewing && strategy && (
                   <div className="w-full max-w-6xl mx-auto p-12 flex flex-col space-y-10 animate-in fade-in slide-in-from-bottom-6">
                     <div className="text-center space-y-4">
