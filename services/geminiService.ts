@@ -1,13 +1,31 @@
 
-import { GoogleGenAI, Type } from "@google/genai";
+import { GoogleGenAI } from "@google/genai";
 import { UploadedImage, SuccessStrategy } from "../types";
+
+/**
+ * アスペクト比の計算
+ */
+const getClosestAspectRatio = (width: number, height: number): "1:1" | "3:4" | "4:3" | "9:16" | "16:9" => {
+  const ratio = width / height;
+  const supported: { name: "1:1" | "3:4" | "4:3" | "9:16" | "16:9"; value: number }[] = [
+    { name: '1:1', value: 1.0 },
+    { name: '3:4', value: 0.75 },
+    { name: '4:3', value: 1.333 },
+    { name: '9:16', value: 0.5625 },
+    { name: '16:9', value: 1.777 },
+  ];
+  
+  return supported.reduce((prev, curr) => 
+    Math.abs(curr.value - ratio) < Math.abs(prev.value - ratio) ? curr : prev
+  ).name;
+};
 
 /**
  * 参考画像から「売れる意図」を深く分析する
  */
-export const analyzeSuccessDNA = async (
+async function analyzeSuccessDNA(
   referenceImages: UploadedImage[]
-): Promise<SuccessStrategy> => {
+): Promise<SuccessStrategy> {
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
   const model = 'gemini-3-pro-preview';
 
@@ -33,7 +51,10 @@ export const analyzeSuccessDNA = async (
   const response = await ai.models.generateContent({
     model,
     contents: { parts: [...imageParts, { text: prompt }] },
-    config: { responseMimeType: "application/json" }
+    config: { 
+      responseMimeType: "application/json",
+      thinkingConfig: { thinkingBudget: 16000 }
+    }
   });
 
   try {
@@ -42,36 +63,18 @@ export const analyzeSuccessDNA = async (
   } catch (e) {
     throw new Error("成功DNAの分析に失敗しました。AIの回答を解析できません。");
   }
-};
-
-/**
- * アスペクト比の計算
- */
-const getClosestAspectRatio = (width: number, height: number): string => {
-  const ratio = width / height;
-  const supported = [
-    { name: '1:1', value: 1.0 },
-    { name: '3:4', value: 0.75 },
-    { name: '4:3', value: 1.333 },
-    { name: '9:16', value: 0.5625 },
-    { name: '16:9', value: 1.777 },
-  ];
-  
-  return supported.reduce((prev, curr) => 
-    Math.abs(curr.value - ratio) < Math.abs(prev.value - ratio) ? curr : prev
-  ).name;
-};
+}
 
 /**
  * 分析結果と素材を融合させて、画像を生成・改善する
  */
-export const generateFinalFV = async (
+async function generateFinalFV(
   strategy: SuccessStrategy,
   assetImages: UploadedImage[],
   userRequest: string,
   dimensions: { width: number; height: number },
   previousImage?: string
-): Promise<string> => {
+): Promise<string> {
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
   const model = 'gemini-3-pro-image-preview';
 
@@ -115,7 +118,7 @@ export const generateFinalFV = async (
     contents: { parts: contentParts },
     config: {
       imageConfig: {
-        aspectRatio: mappedRatio as any
+        aspectRatio: mappedRatio
       }
     }
   });
@@ -127,4 +130,6 @@ export const generateFinalFV = async (
   }
 
   throw new Error("画像の生成に失敗しました。");
-};
+}
+
+export { analyzeSuccessDNA, generateFinalFV };
