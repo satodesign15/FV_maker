@@ -1,0 +1,6 @@
+
+{
+  "name": "PixelPerfect FV - 高精度再現ジェネレーター",
+  "description": "参考画像のDNAを分析し、95%以上の再現度でプロ仕様のファーストビュー画像を生成します。",
+  "requestFramePermissions": []
+}
