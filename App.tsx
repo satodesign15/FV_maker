@@ -1,9 +1,8 @@
-
 import React, { useState, useEffect } from 'react';
 import { UploadedImage, AppStatus, SuccessStrategy, GenerationHistory } from './types';
 import { ImageUploader } from './components/ImageUploader';
 import { Button } from './components/Button';
-import * as GeminiService from './services/geminiService';
+import { analyzeSuccessDNA, generateFinalFV } from './services/geminiService';
 import { 
   Sparkles, 
   RotateCcw, 
@@ -79,7 +78,7 @@ const App: React.FC = () => {
     setError('');
     setStatus(AppStatus.ANALYZING);
     try {
-      const analyzedStrategy = await GeminiService.analyzeSuccessDNA(refImages);
+      const analyzedStrategy = await analyzeSuccessDNA(refImages);
       setStrategy(analyzedStrategy);
       setStatus(AppStatus.REVIEWING_STRATEGY);
     } catch (e: any) {
@@ -95,7 +94,7 @@ const App: React.FC = () => {
     }
     setStatus(AppStatus.GENERATING);
     try {
-      const b64 = await GeminiService.generateFinalFV(strategy, assetImages, userRequest, dimensions);
+      const b64 = await generateFinalFV(strategy, assetImages, userRequest, dimensions);
       const newEntry: GenerationHistory = { imageUrl: b64, dimensions: { ...dimensions }, strategy: { ...strategy } };
       const newHistory = [...history.slice(0, currentIndex + 1), newEntry];
       setHistory(newHistory);
@@ -113,7 +112,7 @@ const App: React.FC = () => {
     try {
       const currentEntry = history[currentIndex];
       const instruction = customInstruction || adjustment || "微調整";
-      const b64 = await GeminiService.generateFinalFV(strategy, assetImages, instruction, dimensions, currentEntry.imageUrl);
+      const b64 = await generateFinalFV(strategy, assetImages, instruction, dimensions, currentEntry.imageUrl);
       const newEntry: GenerationHistory = { imageUrl: b64, dimensions: { ...dimensions }, strategy: { ...strategy } };
       const newHistory = [...history.slice(0, currentIndex + 1), newEntry];
       setHistory(newHistory);
