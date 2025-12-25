@@ -1,4 +1,3 @@
-
 import { GoogleGenAI } from "@google/genai";
 import { UploadedImage, SuccessStrategy } from "../types";
 
@@ -132,4 +131,5 @@ async function generateFinalFV(
   throw new Error("画像の生成に失敗しました。");
 }
 
+// 明示的な名前付きエクスポート（ビルドエラー回避のため）
 export { analyzeSuccessDNA, generateFinalFV };
